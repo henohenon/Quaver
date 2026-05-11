@@ -3,23 +3,23 @@ import type { AudioStyle } from '../index';
 import { generateMelody, melodyDurationSec, midiToFreq } from '../melody';
 import { awaitPlaybackDuration, cancelPlayback } from '../playback';
 
-// Music box: sine + 短いdecay、 オルゴール風。 spec audioStyle 0。
+// Plucked: triangle + 鋭いattack、 ハープ/撥弦風。 spec audioStyle 6。
 
 let synth: Tone.PolySynth<Tone.Synth> | null = null;
 
 function ensureSynth(): Tone.PolySynth<Tone.Synth> {
   if (synth) return synth;
   synth = new Tone.PolySynth(Tone.Synth, {
-    oscillator: { type: 'sine' },
-    envelope: { attack: 0.001, decay: 0.8, sustain: 0, release: 0.6 },
+    oscillator: { type: 'triangle' },
+    envelope: { attack: 0.002, decay: 0.45, sustain: 0, release: 0.25 },
   }).toDestination();
   synth.volume.value = -8;
   return synth;
 }
 
-export const musicBox: AudioStyle = {
-  id: 0,
-  name: 'Music box',
+export const plucked: AudioStyle = {
+  id: 6,
+  name: 'Plucked',
 
   async play(mod) {
     await Tone.start();
