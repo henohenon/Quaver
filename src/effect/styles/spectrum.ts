@@ -27,6 +27,8 @@ barGeometry.translate(0, 0, 0.5);
 
 let running = false;
 let rafId = 0;
+// 現在 play() で待機中の Promise resolve。 stop() から明示 resolve できるようにモジュールに保持。
+let pendingResolve: (() => void) | null = null;
 
 function setupScene(targetCanvas: HTMLCanvasElement): void {
   if (renderer && canvasRef === targetCanvas) return;
@@ -174,9 +176,14 @@ export const spectrum: VisualEffect = {
     const tmpMatrix = new THREE.Matrix4();
 
     return new Promise<void>((resolve) => {
+      pendingResolve = resolve;
+      const settle = (): void => {
+        if (pendingResolve === resolve) pendingResolve = null;
+        resolve();
+      };
       const tick = (): void => {
         if (!running) {
-          resolve();
+          settle();
           return;
         }
         const tSec = (performance.now() - startMs) / 1000;
@@ -214,7 +221,7 @@ export const spectrum: VisualEffect = {
 
         if (tSec >= totalSec) {
           running = false;
-          resolve();
+          settle();
           return;
         }
         rafId = requestAnimationFrame(tick);
@@ -226,6 +233,12 @@ export const spectrum: VisualEffect = {
   stop(): void {
     running = false;
     cancelAnimationFrame(rafId);
+    // pending Promise を即解決 (cancelAnimationFrame で tick が来なくなるので明示 resolve)。
+    if (pendingResolve) {
+      const r = pendingResolve;
+      pendingResolve = null;
+      r();
+    }
     clearScene();
     renderer?.clear();
   },

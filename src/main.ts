@@ -137,7 +137,7 @@ function setHeroError(hero: HTMLElement, msg: string | null): void {
 
 // ----- Scan screen -----
 
-const LOST_TIMEOUT_MS = 800;
+const LOST_TIMEOUT_MS = 300;
 
 function initScanScreen(): void {
   const video = $<HTMLVideoElement>('video');
