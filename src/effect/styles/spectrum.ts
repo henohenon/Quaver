@@ -11,9 +11,8 @@ import { getAnalyser, ANALYSER_FFT_SIZE } from '../../audio/analyser';
 const MIN_DB = -100;
 const MAX_DB = -20;
 const MIN_BAR_HEIGHT = 0.01;
-const MAX_BAR_HEIGHT = 1.4;
-const GRID_DIM = 8;            // 8x8 = 64本、 ANALYSER_FFT_SIZE と一致する想定
-const BAR_FILL = 0.78;          // セル内のbar占有比率 (1未満で隙間)
+const MAX_BAR_HEIGHT = 0.8;    // bar数が多いので低めに (QR黒モジュール = 数百本)
+const BAR_FILL = 0.85;          // セル内のbar占有比率
 const TAIL_SEC = 0.4;          // 音終了後の余韻
 
 let renderer: THREE.WebGLRenderer | null = null;
@@ -110,8 +109,7 @@ export const spectrum: VisualEffect = {
     setupScene(targetCanvas);
   },
 
-  // _matrix: QR matrix は spectrum描画では使わない (audio FFT駆動)
-  async play(_matrix: QRMatrix, mod: Modulation, getContext: EffectContextProvider): Promise<void> {
+  async play(matrix: QRMatrix, mod: Modulation, getContext: EffectContextProvider): Promise<void> {
     setupScene(canvasRef ?? document.createElement('canvas'));
     if (!renderer || !scene || !camera) throw new Error('spectrum scene not initialized');
     clearScene();
@@ -123,7 +121,6 @@ export const spectrum: VisualEffect = {
 
     const analyser = getAnalyser();
     const numBins = ANALYSER_FFT_SIZE;
-    const numCells = GRID_DIM * GRID_DIM;
 
     const markerRoot = new THREE.Group();
     markerRoot.matrixAutoUpdate = false;
@@ -133,20 +130,24 @@ export const spectrum: VisualEffect = {
     );
     scene.add(markerRoot);
 
-    // bars: GRID_DIM x GRID_DIM の 2D grid に配置、 binは noteSeeds由来 permutation でスクランブル
-    const cellSize = 2 / GRID_DIM;
+    // QR の黒モジュール位置に bars を配置する。
+    // 黒モジュール数は ~200-500、 これを numBins (64) で循環シェアする。
+    // moduleCounter * 7 + 11 (7 は numBins=64 と互いに素) で 周期を崩す。
+    const cellSize = 2 / matrix.size;
     const barXY = cellSize * BAR_FILL;
     const halfCell = cellSize / 2;
     const permutation = shuffleBins(numBins, mod.noteSeeds);
 
     const bars: Bar[] = [];
-    for (let cy = 0; cy < GRID_DIM; cy++) {
-      for (let cx = 0; cx < GRID_DIM; cx++) {
-        const cellIdx = cy * GRID_DIM + cx;
-        if (cellIdx >= numCells) break;
-        // セルに割り当てる bin番号 (permutationで散らす)
-        const binIdx = permutation[cellIdx % numBins]!;
-        // 色は bin index 由来 (同じ周波数は同じ色だが、 空間的にバラける)
+    let moduleCounter = 0;
+    for (let row = 0; row < matrix.size; row++) {
+      for (let col = 0; col < matrix.size; col++) {
+        const idx = row * matrix.size + col;
+        if (!matrix.modules[idx]) continue; // 白モジュールはスキップ
+
+        const binIdx = permutation[(moduleCounter * 7 + 11) % numBins]!;
+        moduleCounter++;
+
         const hue = (binIdx / numBins) * 0.85;
         const color = new THREE.Color().setHSL(hue, 0.75, 0.55);
         const material = new THREE.MeshBasicMaterial({
@@ -155,9 +156,9 @@ export const spectrum: VisualEffect = {
           opacity: 0.88,
         });
         const mesh = new THREE.Mesh(barGeometry, material);
-        const x = -1 + halfCell + cx * cellSize;
-        // row=0 (上端) → +Y側
-        const y =  1 - halfCell - cy * cellSize;
+        // marker local: col → X (left→right)、 row → Y (top=+Y)
+        const x = -1 + halfCell + col * cellSize;
+        const y =  1 - halfCell - row * cellSize;
         mesh.position.set(x, y, 0);
         mesh.scale.set(barXY, barXY, MIN_BAR_HEIGHT);
         markerRoot.add(mesh);
