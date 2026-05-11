@@ -12,6 +12,8 @@ const ROOT_MIDI = 72; // C5
 const SUBDIVISION_PER_BEAT = 2; // 8th notes
 
 let synth: Tone.PolySynth | null = null;
+let currentTimeout: number | null = null;
+let currentResolve: (() => void) | null = null;
 
 function ensureSynth(): Tone.PolySynth {
   if (synth) return synth;
@@ -58,11 +60,25 @@ export const musicBox: AudioStyle = {
 
     const totalSec = mod.noteCount * stepSec + 1.0; // 余韻
     await new Promise<void>((resolve) => {
-      setTimeout(resolve, totalSec * 1000);
+      currentResolve = resolve;
+      currentTimeout = window.setTimeout(() => {
+        currentTimeout = null;
+        currentResolve = null;
+        resolve();
+      }, totalSec * 1000);
     });
   },
 
   stop(): void {
     synth?.releaseAll();
+    if (currentTimeout !== null) {
+      clearTimeout(currentTimeout);
+      currentTimeout = null;
+    }
+    if (currentResolve) {
+      const r = currentResolve;
+      currentResolve = null;
+      r();
+    }
   },
 };

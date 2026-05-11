@@ -1,7 +1,7 @@
 import { modulationFor, type Modulation } from './hash';
 import { play, stopAll, styleFor } from './audio';
-import { startScan, type ScanHandle } from './scan';
-import { initEffect, playEffect, stopAllEffects, effectFor } from './effect';
+import { startScan, type ScanHandle, type QRDetection } from './scan';
+import { initEffect, playEffect, stopAllEffects, effectFor, type EffectContext } from './effect';
 import { generateMatrix } from './effect/qr-matrix';
 
 const AUDIO_STYLE_NAMES = [
@@ -49,14 +49,16 @@ let playing = false;
 
 type TriggerOptions = {
   onParams: (mod: Modulation) => void;
-  effectCanvas?: HTMLCanvasElement | null;
-  videoWrap?: HTMLElement | null;
+  effect?: {
+    canvas: HTMLCanvasElement;
+    getContext: () => EffectContext | null;
+  };
 };
 
 async function trigger(text: string, options: TriggerOptions): Promise<void> {
   if (playing || text.length === 0) return;
   playing = true;
-  const { onParams, effectCanvas, videoWrap } = options;
+  const { onParams, effect } = options;
   try {
     stopAll();
     stopAllEffects();
@@ -64,14 +66,9 @@ async function trigger(text: string, options: TriggerOptions): Promise<void> {
     onParams(mod);
 
     const tasks: Promise<unknown>[] = [play(mod)];
-    if (effectCanvas) {
+    if (effect) {
       const matrix = generateMatrix(text);
-      if (videoWrap) videoWrap.classList.add('playing');
-      tasks.push(
-        playEffect(effectCanvas, matrix, mod).finally(() => {
-          if (videoWrap) videoWrap.classList.remove('playing');
-        }),
-      );
+      tasks.push(playEffect(effect.canvas, matrix, mod, effect.getContext));
     }
     await Promise.all(tasks);
   } finally {
@@ -115,77 +112,159 @@ function initDebugScreen(): void {
   });
 }
 
+// ----- Scan screen helpers -----
+
+// video/canvas は CSSの object-fit: cover で viewport を充填する (黒帯廃止)。
+// 端は多少cropされるが、 video/canvas は同じ intrinsic size なので位置整合は保たれる。
+
+// hero画面のエラー表示 (start失敗時)
+function setHeroError(hero: HTMLElement, msg: string | null): void {
+  let el = document.getElementById('heroError') as HTMLParagraphElement | null;
+  if (msg === null) {
+    el?.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement('p');
+    el.id = 'heroError';
+    el.style.color = '#ff9494';
+    el.style.fontSize = '0.85rem';
+    el.style.margin = '0';
+    hero.appendChild(el);
+  }
+  el.textContent = msg;
+}
+
 // ----- Scan screen -----
+
+const LOST_TIMEOUT_MS = 800;
 
 function initScanScreen(): void {
   const video = $<HTMLVideoElement>('video');
-  const placeholder = $<HTMLDivElement>('videoPlaceholder');
+  const hero = $<HTMLDivElement>('hero');
+  const cameraStage = $<HTMLDivElement>('cameraStage');
   const startBtn = $<HTMLButtonElement>('scanStart');
   const stopBtn = $<HTMLButtonElement>('scanStop');
   const status = $<HTMLParagraphElement>('scanStatus');
-  const lastQr = $<HTMLParagraphElement>('lastQr');
-  const output = $<HTMLPreElement>('scanOutput');
   const effectCanvas = $<HTMLCanvasElement>('effectCanvas');
-  const videoWrap = $<HTMLDivElement>('videoWrap');
 
   initEffect(effectCanvas);
 
   let handle: ScanHandle | null = null;
   let lastDetected = '';
+  let latestDetection: QRDetection | null = null;
+  let lastDetectTime = 0;
+  let trackingLost = false;
+  let lostWatchdogId: number | null = null;
 
   const setStatus = (msg: string): void => {
     status.textContent = msg;
   };
 
-  const onDetect = (data: string): void => {
-    // 同じQRを連続検出した場合: 再生中ならskip、別QRに切り替わったら即再生。
+  const showHero = (): void => {
+    cameraStage.hidden = true;
+    hero.hidden = false;
+  };
+
+  const showCamera = (): void => {
+    hero.hidden = true;
+    cameraStage.hidden = false;
+  };
+
+  const getEffectContext = (): EffectContext | null => {
+    if (!latestDetection) return null;
+    const { corners, frameWidth, frameHeight } = latestDetection;
+    return { corners, frameWidth, frameHeight };
+  };
+
+  const startWatchdog = (): void => {
+    if (lostWatchdogId !== null) return;
+    lostWatchdogId = window.setInterval(() => {
+      // 再生中で最終検出から LOST_TIMEOUT_MS 経過 → トラッキング切れ。
+      // 音/エフェクトを即停止+破棄、 latestDetectionも捨てる。
+      if (!playing || trackingLost) return;
+      if (performance.now() - lastDetectTime > LOST_TIMEOUT_MS) {
+        trackingLost = true;
+        stopAll();
+        stopAllEffects();
+        lastDetected = '';
+        latestDetection = null;
+      }
+    }, 100);
+  };
+
+  const stopWatchdog = (): void => {
+    if (lostWatchdogId !== null) {
+      clearInterval(lostWatchdogId);
+      lostWatchdogId = null;
+    }
+  };
+
+  const onDetect = (detection: QRDetection): void => {
+    // 追跡用に毎フレーム最新値を上書き (再生中でも続行)
+    latestDetection = detection;
+    lastDetectTime = performance.now();
+    trackingLost = false;
+
+    const { data } = detection;
     if (data === lastDetected && playing) return;
     lastDetected = data;
-    lastQr.textContent = `detected: ${data}`;
     setStatus('再生中...');
     void trigger(data, {
-      onParams: (mod) => {
-        output.textContent = formatModulation(mod);
+      onParams: () => {
+        // scan画面では modulation params 表示しない (debug画面で見られる)
       },
-      effectCanvas,
-      videoWrap,
+      effect: {
+        canvas: effectCanvas,
+        getContext: getEffectContext,
+      },
     }).then(() => {
-      setStatus('スキャン中 — 次のQRを向けてください');
+      if (trackingLost) {
+        setStatus('トラッキング切れ — QRを向け直して');
+      } else {
+        setStatus('スキャン中 — 次のQRを向けてください');
+      }
     });
   };
 
   const start = async (): Promise<void> => {
     startBtn.disabled = true;
+    setHeroError(hero, null);
     setStatus('カメラ起動中...');
-    placeholder.style.display = 'none';
+    showCamera();
     try {
       handle = await startScan({
         video,
         onDetect,
         onError: (err) => {
-          // 1フレーム失敗は無視 (loopは継続)
           console.warn('scan frame error', err);
         },
       });
       stopBtn.disabled = false;
       setStatus('スキャン中 — QRをカメラに向けてください');
+      lastDetectTime = performance.now(); // start基準でwatchdog計算
+      startWatchdog();
     } catch (err) {
-      placeholder.style.display = 'flex';
-      placeholder.textContent = `カメラエラー: ${describeError(err)}`;
-      setStatus('');
       startBtn.disabled = false;
+      showHero();
+      setHeroError(hero, `カメラエラー: ${describeError(err)}`);
+      setStatus('');
     }
   };
 
   const stop = (): void => {
+    stopWatchdog();
     handle?.stop();
     handle = null;
+    stopAll();
+    stopAllEffects();
+    latestDetection = null;
+    lastDetected = '';
+    trackingLost = false;
     stopBtn.disabled = true;
     startBtn.disabled = false;
-    setStatus('停止しました');
-    placeholder.style.display = 'flex';
-    placeholder.textContent = '「スキャン開始」を押してください';
-    lastDetected = '';
+    setStatus('');
+    showHero();
   };
 
   startBtn.addEventListener('click', () => void start());
@@ -220,16 +299,8 @@ function applyRoute(): void {
   const route = currentRoute();
   const scanEl = $<HTMLElement>('scanScreen');
   const debugEl = $<HTMLElement>('debugScreen');
-  const navLink = $<HTMLAnchorElement>('navLink');
   scanEl.classList.toggle('active', route === 'scan');
   debugEl.classList.toggle('active', route === 'debug');
-  if (route === 'scan') {
-    navLink.textContent = 'debug ▸';
-    navLink.href = '#/debug';
-  } else {
-    navLink.textContent = '◂ scan';
-    navLink.href = '#/';
-  }
 }
 
 initScanScreen();

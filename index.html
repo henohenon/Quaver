@@ -4,42 +4,183 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Quaver</title>
+    <link rel="icon" type="image/svg+xml" href="/quaver.svg" />
+    <meta name="theme-color" content="#0b0b10" />
     <style>
       :root {
         color-scheme: dark;
         font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        --bg: #0b0b10;
+        --fg: #e7e7ef;
+        --muted: #8a8aa0;
+        --accent: #b567ae;
+        --accent-hi: #c47cbc;
+        --panel: #16161f;
+        --border: #2a2a38;
       }
+      *, *::before, *::after { box-sizing: border-box; }
       html, body {
         margin: 0;
         padding: 0;
-        background: #0b0b10;
-        color: #e7e7ef;
+        background: var(--bg);
+        color: var(--fg);
+        min-height: 100vh;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
         min-height: 100vh;
       }
       main {
-        max-width: 720px;
-        margin: 0 auto;
-        padding: 1.5rem 1rem 4rem;
-      }
-      header {
+        flex: 1;
         display: flex;
-        justify-content: space-between;
-        align-items: baseline;
-        margin-bottom: 1.5rem;
+        flex-direction: column;
       }
-      h1 {
-        font-size: 1.5rem;
+      .screen { display: none; }
+      .screen.active { display: flex; flex-direction: column; flex: 1; }
+
+      /* ---- Hero (起動前) ---- */
+      .hero {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 1.4rem;
+        text-align: center;
+        padding: 2rem 1rem 3rem;
+      }
+      .hero .logo {
+        width: 168px;
+        height: 168px;
+        filter: drop-shadow(0 0 32px rgba(181, 103, 174, 0.4));
+      }
+      .hero-name {
+        font-size: 2.4rem;
         margin: 0;
+        letter-spacing: 0.12em;
+        font-weight: 300;
+        color: var(--fg);
+      }
+      .hero-tag {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.95rem;
+        max-width: 320px;
+        line-height: 1.5;
+      }
+
+      /* ---- Camera stage (起動後: viewport overlay) ---- */
+      .camera-stage[hidden] { display: none !important; }
+      .camera-stage {
+        position: fixed;
+        inset: 0;
+        z-index: 100;
+        background: #000;
+      }
+      .video-wrap {
+        position: absolute;
+        inset: 0;
+        background: #000;
+      }
+      .video-wrap video,
+      .video-wrap canvas {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+        /* viewport を埋めるため cover crop (黒帯なし、 端は多少切れる) */
+        object-fit: cover;
+      }
+      .video-wrap canvas {
+        pointer-events: none;
+        background: transparent;
+      }
+
+      /* ---- Buttons (共通) ---- */
+      button {
+        padding: 0.6rem 1.2rem;
+        background: var(--accent);
+        color: white;
+        border: none;
+        border-radius: 6px;
+        font: inherit;
+        cursor: pointer;
+        transition: background 0.15s ease;
+      }
+      button:hover:not(:disabled) { background: var(--accent-hi); }
+      button:disabled { opacity: 0.55; cursor: not-allowed; }
+      .start-btn {
+        padding: 0.85rem 2.2rem;
+        font-size: 1rem;
+        letter-spacing: 0.05em;
+        margin-top: 0.4rem;
+      }
+      .stop-btn {
+        position: absolute;
+        top: max(1rem, env(safe-area-inset-top, 1rem));
+        right: max(1rem, env(safe-area-inset-right, 1rem));
+        width: 40px;
+        height: 40px;
+        padding: 0;
+        border-radius: 50%;
+        background: rgba(0, 0, 0, 0.55);
+        color: white;
+        font-size: 1.1rem;
+        line-height: 1;
+        border: 1px solid rgba(255, 255, 255, 0.22);
+        backdrop-filter: blur(4px);
+        z-index: 101;
+      }
+      .stop-btn:hover:not(:disabled) { background: rgba(0, 0, 0, 0.75); }
+
+      /* ---- Status toast (camera-stage内、 messageあるときだけ表示) ---- */
+      .status {
+        position: absolute;
+        bottom: max(1.5rem, env(safe-area-inset-bottom, 1.5rem));
+        left: 50%;
+        transform: translateX(-50%);
+        margin: 0;
+        padding: 0.5rem 1rem;
+        background: rgba(0, 0, 0, 0.6);
+        border-radius: 99px;
+        font-size: 0.85rem;
+        color: white;
+        backdrop-filter: blur(4px);
+        opacity: 0;
+        transition: opacity 0.25s ease;
+        pointer-events: none;
+        white-space: nowrap;
+        max-width: calc(100vw - 2rem);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        z-index: 101;
+      }
+      .status:not(:empty) { opacity: 1; }
+
+      /* ---- Debug screen ---- */
+      .debug-wrap {
+        max-width: 720px;
+        width: 100%;
+        margin: 0 auto;
+        padding: 1.5rem 1rem 2rem;
+      }
+      .debug-wrap h2 {
+        margin: 0 0 1.2rem;
+        font-size: 1.2rem;
+        font-weight: 400;
+        color: var(--muted);
         letter-spacing: 0.05em;
       }
-      .nav {
-        font-size: 0.8rem;
-        color: #6a6a80;
+      .debug-wrap .nav-back {
+        display: inline-block;
+        margin-bottom: 1rem;
+        color: var(--muted);
         text-decoration: none;
+        font-size: 0.85rem;
       }
-      .nav:hover { color: #aaa; }
-      .screen { display: none; }
-      .screen.active { display: block; }
+      .debug-wrap .nav-back:hover { color: #aaa; }
       form {
         display: flex;
         gap: 0.5rem;
@@ -48,112 +189,55 @@
       input[type="text"] {
         flex: 1;
         padding: 0.6rem 0.8rem;
-        background: #16161f;
+        background: var(--panel);
         color: inherit;
-        border: 1px solid #2a2a38;
-        border-radius: 4px;
-        font: inherit;
-      }
-      button {
-        padding: 0.6rem 1.2rem;
-        background: #4a4aff;
-        color: white;
-        border: none;
-        border-radius: 4px;
-        font: inherit;
-        cursor: pointer;
-      }
-      button:hover:not(:disabled) { background: #5a5aff; }
-      button:disabled { opacity: 0.6; cursor: not-allowed; }
-      .video-wrap {
-        position: relative;
-        aspect-ratio: 4 / 3;
-        background: #000;
+        border: 1px solid var(--border);
         border-radius: 6px;
-        overflow: hidden;
-        margin-bottom: 1rem;
-      }
-      .video-wrap video,
-      .video-wrap canvas {
-        position: absolute;
-        inset: 0;
-        width: 100%;
-        height: 100%;
-      }
-      .video-wrap video {
-        object-fit: cover;
-      }
-      .video-wrap canvas {
-        display: none;
-        background: #0b0b10;
-      }
-      .video-wrap.playing video { display: none; }
-      .video-wrap.playing canvas { display: block; }
-      .video-wrap .placeholder {
-        position: absolute;
-        inset: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: #5a5a6a;
-        font-size: 0.9rem;
-      }
-      .status {
-        font-size: 0.85rem;
-        color: #8a8aa0;
-        margin: 0 0 1rem;
-        min-height: 1.2em;
-      }
-      .scan-controls {
-        display: flex;
-        gap: 0.5rem;
-        margin-bottom: 1rem;
+        font: inherit;
       }
       pre {
-        background: #16161f;
-        border: 1px solid #2a2a38;
-        border-radius: 4px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
         padding: 1rem;
         overflow-x: auto;
         font-size: 0.85rem;
         margin: 0;
       }
-      .last-qr {
-        font-size: 0.8rem;
-        color: #6a6a80;
-        margin: 0 0 0.5rem;
-        word-break: break-all;
-      }
     </style>
   </head>
   <body>
     <main>
-      <header>
-        <h1>Quaver</h1>
-        <a id="navLink" class="nav" href="#/debug">debug ▸</a>
-      </header>
-
       <section id="scanScreen" class="screen">
-        <div id="videoWrap" class="video-wrap">
-          <video id="video" playsinline muted></video>
-          <canvas id="effectCanvas"></canvas>
-          <div id="videoPlaceholder" class="placeholder">「スキャン開始」を押してください</div>
+        <!-- 起動前: ヒーロー -->
+        <div id="hero" class="hero">
+          <img class="logo" src="/quaver.svg" alt="Quaver" />
+          <h2 class="hero-name">Quaver</h2>
+          <p class="hero-tag">QRに宿る音と動きを呼び出す</p>
+          <button id="scanStart" type="button" class="start-btn">スキャン開始</button>
         </div>
-        <p id="scanStatus" class="status"></p>
-        <div class="scan-controls">
-          <button id="scanStart" type="button">スキャン開始</button>
-          <button id="scanStop" type="button" disabled>停止</button>
+
+        <!-- 起動後: フルスクリーン overlay (video + canvas のみ可視) -->
+        <div id="cameraStage" class="camera-stage" hidden>
+          <div id="videoWrap" class="video-wrap">
+            <video id="video" playsinline muted></video>
+            <canvas id="effectCanvas"></canvas>
+          </div>
+          <button id="scanStop" type="button" class="stop-btn" aria-label="停止" title="停止">✕</button>
+          <p id="scanStatus" class="status"></p>
         </div>
-        <p id="lastQr" class="last-qr"></p>
-        <pre id="scanOutput">QRをスキャンすると、対応する変調パラメータと音が再生されます</pre>
       </section>
 
       <section id="debugScreen" class="screen">
-        <form id="form">
-          <input id="text" type="text" placeholder="文字列を入力..." autocomplete="off" />
-          <button type="submit">鳴らす</button>
-        </form>
-        <pre id="output">ここに変調パラメータが表示されます</pre>
+        <div class="debug-wrap">
+          <a class="nav-back" href="#/">◂ scan</a>
+          <h2>Debug</h2>
+          <form id="form">
+            <input id="text" type="text" placeholder="文字列を入力..." autocomplete="off" />
+            <button type="submit">鳴らす</button>
+          </form>
+          <pre id="output">ここに変調パラメータが表示されます</pre>
+        </div>
       </section>
     </main>
     <script type="module" src="/src/main.ts"></script>

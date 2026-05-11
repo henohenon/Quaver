@@ -1,12 +1,23 @@
 import jsQR from 'jsqr';
 
+export type Corner = { x: number; y: number };
+
+export type QRDetection = {
+  data: string;
+  /** topLeft, topRight, bottomRight, bottomLeft の順 (時計回り) */
+  corners: [Corner, Corner, Corner, Corner];
+  /** jsQRに渡したフレームの寸法 (intrinsics近似に使う) */
+  frameWidth: number;
+  frameHeight: number;
+};
+
 export type ScanHandle = {
   stop(): void;
 };
 
 export type ScanOptions = {
   video: HTMLVideoElement;
-  onDetect(data: string): void;
+  onDetect(detection: QRDetection): void;
   onError?(error: unknown): void;
 };
 
@@ -57,7 +68,6 @@ export async function startScan(options: ScanOptions): Promise<ScanHandle> {
     try {
       imageData = ctx.getImageData(0, 0, w, h);
     } catch (err) {
-      // tainted canvas等。1フレームskipで継続。
       onError?.(err);
       return;
     }
@@ -66,7 +76,18 @@ export async function startScan(options: ScanOptions): Promise<ScanHandle> {
       inversionAttempts: 'dontInvert',
     });
     if (code && code.data.length > 0) {
-      onDetect(code.data);
+      const loc = code.location;
+      onDetect({
+        data: code.data,
+        corners: [
+          { x: loc.topLeftCorner.x, y: loc.topLeftCorner.y },
+          { x: loc.topRightCorner.x, y: loc.topRightCorner.y },
+          { x: loc.bottomRightCorner.x, y: loc.bottomRightCorner.y },
+          { x: loc.bottomLeftCorner.x, y: loc.bottomLeftCorner.y },
+        ],
+        frameWidth: w,
+        frameHeight: h,
+      });
     }
   };
 

@@ -1,21 +1,22 @@
 import * as THREE from 'three';
-import type { VisualEffect } from '../index';
+import type { VisualEffect, EffectContext, EffectContextProvider } from '../index';
 import type { Modulation } from '../../hash';
 import type { QRMatrix } from '../qr-matrix';
+import { estimatePose, type Pose } from '../pose';
 
-// Crumble: QRの黒モジュールが音階の高さに沿って上昇 + フェード。
-// 各モジュールは noteCount にmoduloで対応する note に紐づき、 そのnoteの時刻から rise が始まる。
+// Crumble: marker pose を毎フレーム再推定 (追跡)。
+// cube は marker local の Z=0平面に固定配置、 +Z方向 (法線、 toward camera) に上昇 + フェード。
+// markerRoot に pose transform を適用、 cube は markerRoot 子なので追従する。
 
-const CELL_SIZE = 0.3;
-const RISE_DURATION = 2.0; // sec — 1モジュールが上昇しきって消えるまで
-const TAIL_SEC = 1.0;       // 余韻
+const RISE_DURATION = 2.0;
+const TAIL_SEC = 1.0;
 
 let renderer: THREE.WebGLRenderer | null = null;
 let scene: THREE.Scene | null = null;
 let camera: THREE.PerspectiveCamera | null = null;
 let canvasRef: HTMLCanvasElement | null = null;
 
-const sharedGeometry = new THREE.BoxGeometry(CELL_SIZE * 0.9, CELL_SIZE * 0.9, CELL_SIZE * 0.9);
+const sharedGeometry = new THREE.BoxGeometry(1, 1, 1);
 
 let running = false;
 let rafId = 0;
@@ -28,37 +29,55 @@ function setupScene(targetCanvas: HTMLCanvasElement): void {
     alpha: true,
     antialias: true,
   });
+  renderer.setClearColor(0x000000, 0);
   renderer.setPixelRatio(window.devicePixelRatio);
   scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
-  camera.position.set(0, 4, 15);
-  camera.lookAt(0, 0, 0);
-  resize();
+  camera = new THREE.PerspectiveCamera(50, 1, 0.01, 200);
 }
 
-function resize(): void {
-  if (!renderer || !canvasRef || !camera) return;
-  const w = canvasRef.clientWidth;
-  const h = canvasRef.clientHeight;
-  if (w === 0 || h === 0) return;
-  renderer.setSize(w, h, false);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
+/**
+ * canvas の内部 pixel buffer を raw frame サイズに合わせる。
+ * CSSは `object-fit: cover` で viewport にcrop表示 — videoと同じ intrinsic sizeなので位置整合する。
+ * Three は raw frame aspectで render、 CSS側でcropが起こる。
+ */
+function resizeRendererToFrame(frameW: number, frameH: number): void {
+  if (!renderer) return;
+  renderer.setSize(frameW, frameH, false);
 }
 
 function clearScene(): void {
   if (!scene) return;
   for (const child of [...scene.children]) {
     scene.remove(child);
-    if (child instanceof THREE.Mesh) {
-      const mat = child.material;
-      if (Array.isArray(mat)) {
-        mat.forEach((m) => m.dispose());
-      } else {
-        mat.dispose();
+    child.traverse((obj) => {
+      if (obj instanceof THREE.Mesh) {
+        const m = obj.material;
+        if (Array.isArray(m)) m.forEach((x) => x.dispose());
+        else m.dispose();
       }
-    }
+    });
   }
+}
+
+function poseToMatrix(pose: Pose, out: THREE.Matrix4): void {
+  // OpenCV camera frame (Y down, Z forward) → Three (Y up, Z backward)
+  // M_three = D * [R | t]   where D = diag(1, -1, -1)
+  const R = pose.R;
+  const t = pose.t;
+  out.set(
+     R[0]!,  R[1]!,  R[2]!,  t[0]!,
+    -R[3]!, -R[4]!, -R[5]!, -t[1]!,
+    -R[6]!, -R[7]!, -R[8]!, -t[2]!,
+         0,      0,      0,      1,
+  );
+}
+
+function applyIntrinsics(cam: THREE.PerspectiveCamera, ctx: EffectContext): void {
+  // fy ≈ frameHeight、 fov_v = 2*atan(0.5) ≈ 53.13°
+  const fovV = (2 * Math.atan(0.5) * 180) / Math.PI;
+  cam.fov = fovV;
+  cam.aspect = ctx.frameWidth / ctx.frameHeight;
+  cam.updateProjectionMatrix();
 }
 
 type Cube = {
@@ -76,15 +95,26 @@ export const crumble: VisualEffect = {
     setupScene(targetCanvas);
   },
 
-  async play(matrix: QRMatrix, mod: Modulation): Promise<void> {
+  async play(matrix: QRMatrix, mod: Modulation, getContext: EffectContextProvider): Promise<void> {
     setupScene(canvasRef ?? document.createElement('canvas'));
-    if (!renderer || !scene || !camera) {
-      throw new Error('crumble scene not initialized');
-    }
-    resize();
+    if (!renderer || !scene || !camera) throw new Error('crumble scene not initialized');
     clearScene();
 
-    const halfGrid = (matrix.size * CELL_SIZE) / 2;
+    // 初期 context (呼び出し直前に scan onDetect が更新済みのはず)。
+    const initialCtx = getContext();
+    if (!initialCtx) throw new Error('no detection context at play start');
+    resizeRendererToFrame(initialCtx.frameWidth, initialCtx.frameHeight);
+    applyIntrinsics(camera, initialCtx);
+
+    const markerRoot = new THREE.Group();
+    markerRoot.matrixAutoUpdate = false;
+    poseToMatrix(estimatePose(initialCtx.corners, initialCtx.frameWidth, initialCtx.frameHeight), markerRoot.matrix);
+    scene.add(markerRoot);
+
+    // === Cube grid (marker local: X right, Y up, +Z out-of-plane) ===
+    const cellSize = 2 / matrix.size;
+    const halfCell = cellSize / 2;
+
     const beatSec = 60 / mod.bpm;
     const stepSec = beatSec / 2;
     const totalSec = mod.noteCount * stepSec + RISE_DURATION + TAIL_SEC;
@@ -96,28 +126,28 @@ export const crumble: VisualEffect = {
         if (!matrix.modules[idx]) continue;
 
         const material = new THREE.MeshBasicMaterial({
-          color: 0xe7e7ef,
+          color: 0x000000,
           transparent: true,
           opacity: 1,
         });
         const mesh = new THREE.Mesh(sharedGeometry, material);
-        const x = col * CELL_SIZE - halfGrid + CELL_SIZE / 2;
-        // 行0を奥に置く (QRの上端が奥)
-        const z = row * CELL_SIZE - halfGrid + CELL_SIZE / 2;
-        mesh.position.set(x, 0, z);
-        scene.add(mesh);
+        mesh.scale.set(cellSize * 0.95, cellSize * 0.95, cellSize * 0.3);
+        const x = -1 + halfCell + col * cellSize;
+        const y =  1 - halfCell - row * cellSize;
+        mesh.position.set(x, y, 0);
+        markerRoot.add(mesh);
 
         const byte = mod.noteSeeds[idx % mod.noteSeeds.length]!;
         const noteIdx = idx % mod.noteCount;
         const startDelay = noteIdx * stepSec;
-        // 上昇高さは 2..8 の範囲で byte値依存
-        const riseHeight = 2 + (byte / 255) * 6;
+        const riseHeight = 0.5 + (byte / 255) * 1.5;
         cubes.push({ mesh, material, startDelay, riseHeight });
       }
     }
 
     running = true;
     const startMs = performance.now();
+    const tmpMatrix = new THREE.Matrix4();
 
     return new Promise<void>((resolve) => {
       const tick = (): void => {
@@ -125,31 +155,37 @@ export const crumble: VisualEffect = {
           resolve();
           return;
         }
-        const t = (performance.now() - startMs) / 1000;
+        const tSec = (performance.now() - startMs) / 1000;
+
+        // === 追従: 最新 context で pose再計算 ===
+        // null (marker一時lost) なら markerRoot.matrix は前回値を維持。
+        const liveCtx = getContext();
+        if (liveCtx) {
+          try {
+            const pose = estimatePose(liveCtx.corners, liveCtx.frameWidth, liveCtx.frameHeight);
+            poseToMatrix(pose, tmpMatrix);
+            markerRoot.matrix.copy(tmpMatrix);
+          } catch {
+            // singular等は無視、 直前pose維持
+          }
+        }
 
         for (const c of cubes) {
-          const local = t - c.startDelay;
+          const local = tSec - c.startDelay;
           if (local <= 0) continue;
           if (local >= RISE_DURATION) {
             c.mesh.visible = false;
             continue;
           }
-          // ease-out cubic
           const p = local / RISE_DURATION;
           const ease = 1 - Math.pow(1 - p, 3);
-          c.mesh.position.y = ease * c.riseHeight;
+          c.mesh.position.z = ease * c.riseHeight;
           c.material.opacity = 1 - p;
         }
 
-        // ゆるい orbit — 視覚的な動きを付ける
-        const orbit = t * 0.15;
-        camera!.position.x = Math.sin(orbit) * 14;
-        camera!.position.z = Math.cos(orbit) * 14;
-        camera!.lookAt(0, 1.5, 0);
-
         renderer!.render(scene!, camera!);
 
-        if (t >= totalSec) {
+        if (tSec >= totalSec) {
           running = false;
           resolve();
           return;
