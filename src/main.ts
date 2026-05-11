@@ -12,7 +12,7 @@ const AUDIO_STYLE_NAMES = [
 ] as const;
 
 const VISUAL_STYLE_NAMES = [
-  'Crumble', 'Swarm', 'Crystal', 'Liquid',
+  'Spectrum', 'Swarm', 'Crystal', 'Liquid',
   'Explosion', 'Constellation', 'Origami', 'Decay',
 ] as const;
 

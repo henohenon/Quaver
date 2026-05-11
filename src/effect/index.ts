@@ -1,7 +1,7 @@
 import type { Modulation } from '../hash';
 import type { QRMatrix } from './qr-matrix';
 import type { Corner } from '../scan';
-import { crumble } from './styles/crumble';
+import { spectrum } from './styles/spectrum';
 
 export type EffectContext = {
   corners: [Corner, Corner, Corner, Corner];
@@ -22,13 +22,13 @@ export type VisualEffect = {
   stop(): void;
 };
 
-// 未実装IDは Crumble にフォールバック (体験を切らさない)。
+// 未実装IDは Spectrum にフォールバック (体験を切らさない)。
 const REGISTRY: Partial<Record<number, VisualEffect>> = {
-  0: crumble,
+  0: spectrum,
 };
 
 export function effectFor(mod: Modulation): VisualEffect {
-  return REGISTRY[mod.visualStyle] ?? crumble;
+  return REGISTRY[mod.visualStyle] ?? spectrum;
 }
 
 export function initEffect(canvas: HTMLCanvasElement): void {
