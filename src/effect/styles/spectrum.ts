@@ -11,9 +11,9 @@ import { getAnalyser, ANALYSER_FFT_SIZE } from '../../audio/analyser';
 const MIN_DB = -100;
 const MAX_DB = -20;
 const MIN_BAR_HEIGHT = 0.01;
-const MAX_BAR_HEIGHT = 1.6;
-const BAR_THICKNESS_Y = 0.06; // marker local Y方向の厚み
-const BAR_FILL = 0.85;         // bar width 比率 (隣との隙間)
+const MAX_BAR_HEIGHT = 1.4;
+const GRID_DIM = 8;            // 8x8 = 64本、 ANALYSER_FFT_SIZE と一致する想定
+const BAR_FILL = 0.78;          // セル内のbar占有比率 (1未満で隙間)
 const TAIL_SEC = 0.4;          // 音終了後の余韻
 
 let renderer: THREE.WebGLRenderer | null = null;
@@ -80,7 +80,25 @@ function applyIntrinsics(cam: THREE.PerspectiveCamera, frameW: number, frameH: n
 type Bar = {
   mesh: THREE.Mesh;
   material: THREE.MeshBasicMaterial;
+  binIdx: number;
 };
+
+/**
+ * Fisher-Yates シャッフルで bin → cell の対応を生成する。
+ * noteSeeds由来の deterministic seed なので、 同じQR → 同じ配置。
+ */
+function shuffleBins(numBins: number, noteSeeds: Uint8Array): number[] {
+  const order = Array.from({ length: numBins }, (_, i) => i);
+  for (let i = numBins - 1; i > 0; i--) {
+    const seed = noteSeeds[i % noteSeeds.length] ?? 0;
+    // (seed * 257) で多少分散させてから mod (連続byteが同じだと弱いシャッフルになるのを軽減)
+    const j = (seed * 257 + i * 31) % (i + 1);
+    const tmp = order[i]!;
+    order[i] = order[j]!;
+    order[j] = tmp;
+  }
+  return order;
+}
 
 export const spectrum: VisualEffect = {
   id: 0,
@@ -103,6 +121,7 @@ export const spectrum: VisualEffect = {
 
     const analyser = getAnalyser();
     const numBins = ANALYSER_FFT_SIZE;
+    const numCells = GRID_DIM * GRID_DIM;
 
     const markerRoot = new THREE.Group();
     markerRoot.matrixAutoUpdate = false;
@@ -112,26 +131,36 @@ export const spectrum: VisualEffect = {
     );
     scene.add(markerRoot);
 
-    // bars: 64 bins を marker X (-1..+1) に並べる
-    const cellWidth = 2 / numBins;
-    const barWidth = cellWidth * BAR_FILL;
-    const halfCell = cellWidth / 2;
+    // bars: GRID_DIM x GRID_DIM の 2D grid に配置、 binは noteSeeds由来 permutation でスクランブル
+    const cellSize = 2 / GRID_DIM;
+    const barXY = cellSize * BAR_FILL;
+    const halfCell = cellSize / 2;
+    const permutation = shuffleBins(numBins, mod.noteSeeds);
 
     const bars: Bar[] = [];
-    for (let i = 0; i < numBins; i++) {
-      const hue = i / numBins * 0.85; // 0..0.85 (赤→紫の手前まで、 似た色避ける)
-      const color = new THREE.Color().setHSL(hue, 0.75, 0.55);
-      const material = new THREE.MeshBasicMaterial({
-        color,
-        transparent: true,
-        opacity: 0.88,
-      });
-      const mesh = new THREE.Mesh(barGeometry, material);
-      const x = -1 + halfCell + i * cellWidth;
-      mesh.position.set(x, 0, 0);
-      mesh.scale.set(barWidth, BAR_THICKNESS_Y, MIN_BAR_HEIGHT);
-      markerRoot.add(mesh);
-      bars.push({ mesh, material });
+    for (let cy = 0; cy < GRID_DIM; cy++) {
+      for (let cx = 0; cx < GRID_DIM; cx++) {
+        const cellIdx = cy * GRID_DIM + cx;
+        if (cellIdx >= numCells) break;
+        // セルに割り当てる bin番号 (permutationで散らす)
+        const binIdx = permutation[cellIdx % numBins]!;
+        // 色は bin index 由来 (同じ周波数は同じ色だが、 空間的にバラける)
+        const hue = (binIdx / numBins) * 0.85;
+        const color = new THREE.Color().setHSL(hue, 0.75, 0.55);
+        const material = new THREE.MeshBasicMaterial({
+          color,
+          transparent: true,
+          opacity: 0.88,
+        });
+        const mesh = new THREE.Mesh(barGeometry, material);
+        const x = -1 + halfCell + cx * cellSize;
+        // row=0 (上端) → +Y側
+        const y =  1 - halfCell - cy * cellSize;
+        mesh.position.set(x, y, 0);
+        mesh.scale.set(barXY, barXY, MIN_BAR_HEIGHT);
+        markerRoot.add(mesh);
+        bars.push({ mesh, material, binIdx });
+      }
     }
 
     const beatSec = 60 / mod.bpm;
@@ -164,16 +193,14 @@ export const spectrum: VisualEffect = {
           }
         }
 
-        // === FFT 取得 + bar 更新 ===
+        // === FFT 取得 + bar 更新 (bar.binIdx で参照) ===
         const fft = analyser.getValue();
-        // 'fft' typeなら Float32Array が返る (channel=monoのため)
         if (fft instanceof Float32Array) {
-          const len = Math.min(fft.length, bars.length);
-          for (let i = 0; i < len; i++) {
-            const db = fft[i] ?? MIN_DB;
+          for (const b of bars) {
+            const db = fft[b.binIdx] ?? MIN_DB;
             const normalized = Math.max(0, Math.min(1, (db - MIN_DB) / (MAX_DB - MIN_DB)));
             const height = MIN_BAR_HEIGHT + normalized * MAX_BAR_HEIGHT;
-            bars[i]!.mesh.scale.z = height;
+            b.mesh.scale.z = height;
           }
         }
 
